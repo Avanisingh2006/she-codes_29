@@ -3,19 +3,20 @@
     streamlit run app.py
 
 Screens: Home -> Library / Auto-detect -> Calibration -> Live analysis ->
-Session summary -> Progress. Correction mode, comfort check and easier
-variations appear inside Live analysis rather than as separate pages, so the
-user's attention never leaves their movement.
+Session summary -> Progress.
 """
 from __future__ import annotations
 
 import sys
+import re
+import sqlite3
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import streamlit as st
+import db_handler as db
 
 from core import config
 from core.bodygroups import group_status
@@ -34,18 +35,18 @@ st.set_page_config(page_title="MoveWise", page_icon="🧍", layout="wide",
                    initial_sidebar_state="collapsed")
 st.markdown(theme.CSS, unsafe_allow_html=True)
 
-HOME, LIBRARY, DETECT, CALIBRATE, LIVE, SUMMARY, PROGRESS = (
-    "home", "library", "detect", "calibrate", "live", "summary", "progress")
+HOME, LIBRARY, DETECT, CALIBRATE, LIVE, SUMMARY, PROGRESS, ACCOUNT = (
+    "home", "library", "detect", "calibrate", "live", "summary", "progress", "account")
 
 LIBRARY_GROUPS = [
     ("Yoga", [("warrior_2", "△", "Static hold. Front knee, hips, shoulders, arm line "
-               "and torso, all checked independently."),
+                               "and torso, all checked independently."),
               ("tree_pose", "⊥", "Balance hold. Standing-leg stability and body sway, "
-               "with a tolerance that forgives natural micro-movement.")]),
+                               "with a tolerance that forgives natural micro-movement.")]),
     ("Fitness", [("squat", "◇", "Full rep cycle through descent, bottom and ascent. "
-                  "Depth, knee tracking, back angle and symmetry."),
+                                "Depth, knee tracking, back angle and symmetry."),
                  ("bicep_curl", "◈", "Per-arm reps. Range of motion, elbow stability "
-                  "and the body swing that means momentum took over.")]),
+                                "and the body swing that means momentum took over.")]),
 ]
 
 PHASE_TRACKS = {
@@ -53,8 +54,20 @@ PHASE_TRACKS = {
     "bicep_curl": ["start", "curl", "peak", "return"],
 }
 
-
 # --------------------------------------------------------------------------
+# SESSION STATE & AUTHENTICATION INITIALIZATION
+# --------------------------------------------------------------------------
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
+if "user_id" not in st.session_state:
+    st.session_state["user_id"] = None
+if "username" not in st.session_state:
+    st.session_state["username"] = ""
+if "user_profile" not in st.session_state:
+    st.session_state["user_profile"] = None
+if "editing_profile" not in st.session_state:
+    st.session_state["editing_profile"] = False
+
 def S():
     s = st.session_state
     if "screen" not in s:
@@ -73,17 +86,14 @@ def S():
         s.ghost = True
         s.body_map = None
         s.last_coaching = None
-        s.live_src = None          # persisted FrameSource for the live screen
+        s.live_src = None
     return s
 
-
 s = S()
-
 
 def go(screen: str) -> None:
     s.screen = screen
     st.rerun()
-
 
 def header(title: str, sub: str = "", back: str = None) -> None:
     c1, c2 = st.columns([5, 1])
@@ -94,13 +104,10 @@ def header(title: str, sub: str = "", back: str = None) -> None:
         if back and st.button("← Back", key=f"back_{title}"):
             go(back)
 
-
 def disclaimer() -> None:
     st.markdown(theme.note(theme.DISCLAIMER), unsafe_allow_html=True)
 
-
 def source_picker(where: str) -> None:
-    """Shared input chooser. Kept identical everywhere it appears."""
     s.source_mode = st.radio("Input", ["Webcam", "Video file", "Sample clip"],
                              horizontal=True, key=f"src_{where}",
                              index=["Webcam", "Video file", "Sample clip"].index(s.source_mode))
@@ -109,11 +116,8 @@ def source_picker(where: str) -> None:
         titles = {c.key: c.title for c in CLIPS}
         s.clip_key = st.selectbox("Clip", list(titles), format_func=lambda k: titles[k],
                                   key=f"clip_{where}", index=list(titles).index(s.clip_key))
-        # Picking a clip for a different exercise switches the exercise too —
-        # the two must never disagree about what's being analysed.
         picked = next((c for c in CLIPS if c.key == s.clip_key), None)
-        if picked is not None and s.exercise is not None \
-                and picked.exercise_key != s.exercise:
+        if picked is not None and s.exercise is not None and picked.exercise_key != s.exercise:
             s.exercise = picked.exercise_key
     elif s.source_mode == "Video file":
         up = st.file_uploader("Upload a video", type=["mp4", "mov", "avi", "mkv", "webm"],
@@ -125,15 +129,7 @@ def source_picker(where: str) -> None:
         if s.upload:
             st.caption(f"Loaded {Path(s.upload).name}")
 
-
 def match_clip_to_exercise() -> None:
-    """Keep the demo clip in step with the chosen exercise.
-
-    Without this, selecting Warrior II still played whatever clip was last
-    chosen (the default squat), so every exercise appeared to 'only go up and
-    down'. Exercise choice drives the clip; picking a clip in the dropdown
-    drives the exercise the other way (see source_picker).
-    """
     if s.exercise is None or s.source_mode != "Sample clip":
         return
     current = next((c for c in CLIPS if c.key == s.clip_key), None)
@@ -142,27 +138,15 @@ def match_clip_to_exercise() -> None:
     fallback = next((c for c in CLIPS if c.exercise_key == s.exercise), None)
     if fallback is not None:
         s.clip_key = fallback.key
-        # Drop the dropdowns' stored widget state, or Streamlit would restore
-        # the stale selection on the next render and flip the exercise back.
-        for widget_key in [k for k in st.session_state
-                           if isinstance(k, str) and k.startswith("clip_")]:
+        for widget_key in [k for k in st.session_state if isinstance(k, str) and k.startswith("clip_")]:
             del st.session_state[widget_key]
 
-
 def _clear_live_panel_cache() -> None:
-    """Wipe the cached side-panel HTML so a new session starts clean."""
     for key in ("last_cue_html", "last_strip_html", "last_ring_html", "last_metric_html"):
         if key in st.session_state:
             del st.session_state[key]
 
-
 def finish_session() -> None:
-    """Stop analysing, save the session, and open the summary.
-
-    Callable from the always-visible End Session button on the live screen —
-    previously this logic only existed below the capture loop, which a webcam
-    session never exits, so on camera it was unreachable.
-    """
     if s.recorder is None:
         _clear_live_panel_cache()
         go(LIBRARY)
@@ -176,12 +160,30 @@ def finish_session() -> None:
             summary.control_score = float(sum(samples) / len(samples))
     if not getattr(summary, "unstable_events", 0):
         summary.unstable_events = int(getattr(s.recorder, "unstable_events", 0) or 0)
+    
+    # Save local store + Database
     s.store.save(summary)
+    if st.session_state["authenticated"]:
+        user_id = st.session_state["user_id"]
+        if hasattr(db, "save_exercise_summary"):
+            db.save_exercise_summary(user_id, summary)
+        elif hasattr(db, "save_exercise_log"):
+            session_data = {
+                "exercise_name": getattr(summary, "exercise_name", "Unknown"),
+                "movement_score": getattr(summary, "movement_score", None),
+                "control_score": getattr(summary, "control_score", None),
+                "reps": getattr(summary, "reps", 0) or 0,
+                "good_reps": getattr(summary, "good_reps", 0) or 0,
+                "main_issue": getattr(summary, "main_issue", "") or "",
+                "unstable_events": getattr(summary, "unstable_events", 0) or 0,
+                "metric_scores": getattr(summary, "metric_scores", {}) or {},
+            }
+            db.save_exercise_log(user_id, session_data)
+
     s.summary = summary
     s.recorder = None
     _clear_live_panel_cache()
     go(SUMMARY)
-
 
 def build_source():
     if s.source_mode == "Webcam":
@@ -192,9 +194,7 @@ def build_source():
     clip = next(c for c in CLIPS if c.key == s.clip_key)
     return SyntheticSource(clip, loop=False)
 
-
 def _release_live_src() -> None:
-    """Release any FrameSource stored in session state."""
     src = getattr(s, "live_src", None)
     if src is not None:
         try:
@@ -203,28 +203,357 @@ def _release_live_src() -> None:
             pass
         s.live_src = None
 
+# --------------------------------------------------------------------------
+# AUTHENTICATION HELPERS
+# --------------------------------------------------------------------------
+def valid_email(email: str) -> bool:
+    pattern = r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"
+    return bool(re.fullmatch(pattern, email.strip()))
 
-# ==========================================================================
+
+def password_is_strong(password: str) -> bool:
+    return bool(
+        len(password) >= 8
+        and re.search(r"[A-Z]", password)
+        and re.search(r"[a-z]", password)
+        and re.search(r"\d", password)
+        and re.search(r"[^A-Za-z0-9]", password)
+    )
+
+
+def password_strength(password: str) -> str:
+    if not password:
+        return ""
+    if len(password) < 8:
+        return "Weak — use at least 8 characters."
+    if not re.search(r"[A-Z]", password):
+        return "Medium — add an uppercase letter."
+    if not re.search(r"[a-z]", password):
+        return "Medium — add a lowercase letter."
+    if not re.search(r"\d", password):
+        return "Medium — add a number."
+    if not re.search(r"[^A-Za-z0-9]", password):
+        return "Medium — add a special character."
+    return "Strong ✓"
+
+
+def _db_path() -> Path:
+    """Use the same database file as db_handler.py."""
+    return Path(__file__).resolve().parent / "database.db"
+
+
+def get_user_profile(user_id):
+    if not user_id:
+        return None
+    try:
+        with sqlite3.connect(_db_path()) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT id, username, email, age, fitness_goal, experience_level
+                FROM users WHERE id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            return dict(row) if row else None
+    except Exception:
+        return None
+
+
+def update_user_profile(user_id, email, age, fitness_goal, experience_level):
+    if not valid_email(email):
+        return False, "Please enter a valid email address."
+    try:
+        with sqlite3.connect(_db_path()) as conn:
+            conn.execute(
+                """
+                UPDATE users
+                SET email = ?, age = ?, fitness_goal = ?, experience_level = ?
+                WHERE id = ?
+                """,
+                (
+                    email.strip().lower(),
+                    int(age),
+                    fitness_goal,
+                    experience_level,
+                    user_id,
+                ),
+            )
+            conn.commit()
+        return True, "Profile updated successfully."
+    except sqlite3.IntegrityError:
+        return False, "That email is already associated with another account."
+    except Exception as exc:
+        return False, f"Could not update profile: {exc}"
+
+
+def register_account(username, email, password, age, fitness_goal, experience_level):
+    """Support both the old 3-argument and newer 6-argument db_handler."""
+    try:
+        try:
+            result = db.register_user(
+                username, email, password, age, fitness_goal, experience_level
+            )
+        except TypeError:
+            result = db.register_user(username, email, password)
+            if result[0]:
+                with sqlite3.connect(_db_path()) as conn:
+                    conn.execute(
+                        """
+                        UPDATE users
+                        SET age = ?, fitness_goal = ?, experience_level = ?
+                        WHERE username = ?
+                        """,
+                        (int(age), fitness_goal, experience_level, username.strip()),
+                    )
+                    conn.commit()
+        return result
+    except Exception as exc:
+        return False, f"Could not create account: {exc}"
+
+
+def logout_user() -> None:
+    _release_live_src()
+    st.session_state["authenticated"] = False
+    st.session_state["user_id"] = None
+    st.session_state["username"] = ""
+    st.session_state["user_profile"] = None
+    st.session_state["editing_profile"] = False
+    s.screen = HOME
+    st.rerun()
+
+
+def render_auth_page():
+    st.markdown(theme.wordmark(), unsafe_allow_html=True)
+    st.write("")
+    c1, c2, c3 = st.columns([1, 2, 1])
+    with c2:
+        st.markdown(
+            "<div class='mw-glass' style='padding:32px;border-radius:24px;'>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            """
+            <div style="text-align:center;margin-bottom:22px;">
+                <div style="font-size:34px;font-weight:800;">MoveWise</div>
+                <div style="opacity:.72;margin-top:5px;">
+                    Your AI-powered movement & posture coach
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        tab1, tab2 = st.tabs(["Sign In", "Create Account"])
+
+        with tab1:
+            st.subheader("Welcome back 👋")
+            st.caption("Sign in to continue your movement journey.")
+            login_user = st.text_input(
+                "Username", placeholder="Enter your username", key="login_user"
+            )
+            login_pass = st.text_input(
+                "Password", type="password", placeholder="Enter your password", key="login_pass"
+            )
+            if st.button("Sign In →", type="primary", use_container_width=True, key="signin_button"):
+                if not login_user or not login_pass:
+                    st.warning("Please enter both username and password.")
+                else:
+                    ok, res = db.authenticate_user(login_user, login_pass)
+                    if ok:
+                        st.session_state["authenticated"] = True
+                        st.session_state["user_id"] = res["id"]
+                        st.session_state["username"] = res["username"]
+                        st.session_state["user_profile"] = dict(res)
+                        st.success(f"Welcome back, {res['username']}! 👋")
+                        st.rerun()
+                    else:
+                        st.error(res)
+
+        with tab2:
+            st.subheader("Create your MoveWise account")
+            st.caption("A few details help personalize your coaching experience.")
+            reg_user = st.text_input(
+                "Username", placeholder="Choose a username", key="reg_user"
+            )
+            reg_email = st.text_input(
+                "Email", placeholder="you@example.com", key="reg_email"
+            )
+            age = st.number_input(
+                "Age", min_value=13, max_value=100, value=20, step=1, key="reg_age"
+            )
+            fitness_goal = st.selectbox(
+                "Main fitness goal",
+                [
+                    "Improve posture",
+                    "Build strength",
+                    "Improve flexibility",
+                    "Improve mobility",
+                    "General fitness",
+                    "Physiotherapy / rehabilitation",
+                ],
+                key="reg_goal",
+            )
+            experience_level = st.selectbox(
+                "Experience level",
+                ["Beginner", "Intermediate", "Advanced"],
+                key="reg_experience",
+            )
+            reg_pass = st.text_input(
+                "Password", type="password", placeholder="At least 8 characters", key="reg_pass"
+            )
+            if reg_pass:
+                strength = password_strength(reg_pass)
+                if strength == "Strong ✓":
+                    st.success("Password strength: Strong ✓")
+                elif strength.startswith("Medium"):
+                    st.warning(f"Password strength: {strength}")
+                else:
+                    st.error(f"Password strength: {strength}")
+
+            confirm_pass = st.text_input(
+                "Confirm password", type="password", placeholder="Re-enter your password", key="confirm_pass"
+            )
+
+            if st.button(
+                "Create Account →", type="primary", use_container_width=True, key="signup_button"
+            ):
+                if len(reg_user.strip()) < 3:
+                    st.error("Username must contain at least 3 characters.")
+                elif not valid_email(reg_email):
+                    st.error("Please enter a valid email address.")
+                elif not password_is_strong(reg_pass):
+                    st.error(
+                        "Password must contain 8+ characters, uppercase, lowercase, number and special character."
+                    )
+                elif reg_pass != confirm_pass:
+                    st.error("Passwords do not match.")
+                else:
+                    ok, msg = register_account(
+                        reg_user, reg_email, reg_pass, age, fitness_goal, experience_level
+                    )
+                    if ok:
+                        st.success("Account created successfully! You can now sign in. 🎉")
+                    else:
+                        st.error(msg)
+
+        st.markdown("</div>", unsafe_allow_html=True)
+    disclaimer()
+
+
+# --------------------------------------------------------------------------
+# AUTHENTICATION GATE
+# --------------------------------------------------------------------------
+if not st.session_state["authenticated"]:
+    render_auth_page()
+    st.stop()
+
+
+# --------------------------------------------------------------------------
+# PROFILE UI
+# --------------------------------------------------------------------------
+def render_profile_card(show_logout: bool = False):
+    user_id = st.session_state.get("user_id")
+    profile = get_user_profile(user_id)
+    if not profile:
+        st.warning("Your profile could not be loaded. Please sign in again.")
+        return
+
+    st.session_state["user_profile"] = profile
+
+    st.markdown(theme.eyebrow("Your MoveWise profile"), unsafe_allow_html=True)
+    st.markdown(
+        f"""
+        <div class="mw-glass" style="padding:24px;margin:12px 0 22px;">
+            <div style="font-size:28px;font-weight:800;">👤 {profile.get('username', 'User')}</div>
+            <div style="opacity:.68;margin-top:4px;">Personalized movement profile</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if st.button("✏️ Edit Profile", use_container_width=True, key=f"edit_profile_{show_logout}"):
+        st.session_state["editing_profile"] = True
+        st.rerun()
+
+    if st.session_state.get("editing_profile", False):
+        st.markdown("### Edit profile")
+        st.caption("Username cannot be changed here because it identifies your account.")
+
+        email = st.text_input("Email", value=profile.get("email") or "", key=f"profile_email_{show_logout}")
+        age = st.number_input(
+            "Age", min_value=13, max_value=100,
+            value=int(profile.get("age") or 20), step=1,
+            key=f"profile_age_{show_logout}",
+        )
+        goals = [
+            "Improve posture", "Build strength", "Improve flexibility",
+            "Improve mobility", "General fitness", "Physiotherapy / rehabilitation",
+        ]
+        current_goal = profile.get("fitness_goal")
+        goal_index = goals.index(current_goal) if current_goal in goals else 0
+        goal = st.selectbox("Main fitness goal", goals, index=goal_index, key=f"profile_goal_{show_logout}")
+
+        levels = ["Beginner", "Intermediate", "Advanced"]
+        current_level = profile.get("experience_level")
+        level_index = levels.index(current_level) if current_level in levels else 0
+        level = st.selectbox("Experience level", levels, index=level_index, key=f"profile_level_{show_logout}")
+
+        save_col, cancel_col = st.columns(2)
+        with save_col:
+            if st.button("💾 Save Changes", type="primary", use_container_width=True, key=f"save_profile_{show_logout}"):
+                ok, msg = update_user_profile(user_id, email, age, goal, level)
+                if ok:
+                    st.session_state["editing_profile"] = False
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+        with cancel_col:
+            if st.button("Cancel", use_container_width=True, key=f"cancel_profile_{show_logout}"):
+                st.session_state["editing_profile"] = False
+                st.rerun()
+    else:
+        p1, p2, p3 = st.columns(3)
+        p1.markdown(theme.stat(profile.get("username") or "—", "Username"), unsafe_allow_html=True)
+        p2.markdown(theme.stat(profile.get("email") or "—", "Email"), unsafe_allow_html=True)
+        p3.markdown(theme.stat(str(profile.get("age") or "Not set"), "Age"), unsafe_allow_html=True)
+        p4, p5 = st.columns(2)
+        p4.markdown(theme.stat(profile.get("fitness_goal") or "Not set", "Fitness goal"), unsafe_allow_html=True)
+        p5.markdown(theme.stat(profile.get("experience_level") or "Not set", "Experience"), unsafe_allow_html=True)
+
+    if show_logout:
+        st.write("")
+        st.markdown(theme.eyebrow("Account actions"), unsafe_allow_html=True)
+        if st.button("🚪 Log out of MoveWise", type="primary", use_container_width=True, key="account_logout"):
+            logout_user()
+
+
+# --------------------------------------------------------------------------
+# TOP ACCOUNT ACCESS
+# --------------------------------------------------------------------------
+def account_access():
+    if st.button("👤 Account", key="global_account", use_container_width=True):
+        go(ACCOUNT)
+
+
+# --------------------------------------------------------------------------
 # HOME
-# ==========================================================================
+# --------------------------------------------------------------------------
 if s.screen == HOME:
     st.markdown(theme.wordmark(), unsafe_allow_html=True)
     st.write("")
+    top_left, top_right = st.columns([5, 1])
+    with top_right:
+        account_access()
 
     cols = st.columns(4)
     tiles = [
-        ("◎", "Auto-detect", "Start moving and MoveWise works out which of the four "
-         "exercises you're performing.", "Recognise", DETECT),
-        ("▤", "Library", "Two yoga holds and two gym movements, each with its "
-         "own analysis profile.", "Browse", LIBRARY),
-        ("◐", "Adaptive Mode", "Calibrates to the body you have — a missing "
-         "landmark is never an error.", "Calibrate", CALIBRATE),
-        ("◭", "My Progress", "Scores, trends and your movement profile across "
-         "sessions.", "Review", PROGRESS),
+        ("◎", "Auto-detect", "Start moving and MoveWise works out which of the four exercises you're performing.", "Recognise", DETECT),
+        ("▤", "Library", "Two yoga holds and two gym movements, each with its own analysis profile.", "Browse", LIBRARY),
+        ("◐", "Adaptive Mode", "Calibrates to the body you have — a missing landmark is never an error.", "Calibrate", CALIBRATE),
+        ("◭", "My Progress", "Scores, trends and your movement profile across sessions.", "Review", PROGRESS),
     ]
-    # All four buttons share one style: a lone glowing CTA here read as an
-    # inconsistency, not an invitation. Cream stays reserved for real
-    # commit-actions inside a flow (Run calibration, Continue, Finish).
     for col, (ico, title, body, foot, dest) in zip(cols, tiles):
         with col:
             st.markdown(theme.tile(ico, title, body, foot), unsafe_allow_html=True)
@@ -233,18 +562,19 @@ if s.screen == HOME:
                 go(dest)
 
     st.write("")
-    n = len(s.store.all())
+    user_sessions = db.get_user_sessions(st.session_state["user_id"])
+    n = len(user_sessions)
     if n:
-        st.markdown(f"<p style='text-align:center;color:{theme.MUTED};font-size:.8rem;"
-                    f"letter-spacing:.16em;text-transform:uppercase;margin-top:18px'>"
-                    f"{n} session{'s' if n != 1 else ''} recorded on this machine</p>",
-                    unsafe_allow_html=True)
+        st.markdown(
+            f"<p style='text-align:center;color:{theme.MUTED};font-size:.8rem;letter-spacing:.16em;text-transform:uppercase;margin-top:18px'>{n} session{'s' if n != 1 else ''} saved in your database account</p>",
+            unsafe_allow_html=True,
+        )
     disclaimer()
 
 
-# ==========================================================================
+# --------------------------------------------------------------------------
 # LIBRARY
-# ==========================================================================
+# --------------------------------------------------------------------------
 elif s.screen == LIBRARY:
     header("Exercise Library", "Four movements, each with its own analysis profile.", HOME)
     for group, items in LIBRARY_GROUPS:
@@ -253,9 +583,7 @@ elif s.screen == LIBRARY:
         for col, (key, ico, desc) in zip(cols, items):
             prof = s.registry.get(key)
             with col:
-                st.markdown(theme.tile(ico, prof.name, desc,
-                                       prof.movement.value + " · " + prof.category.value),
-                            unsafe_allow_html=True)
+                st.markdown(theme.tile(ico, prof.name, desc, prof.movement.value + " · " + prof.category.value), unsafe_allow_html=True)
                 st.write("")
                 if st.button("Select", key=f"lib_{key}"):
                     s.exercise = key
@@ -264,16 +592,13 @@ elif s.screen == LIBRARY:
     disclaimer()
 
 
-# ==========================================================================
+# --------------------------------------------------------------------------
 # AUTO-DETECT
-# ==========================================================================
+# --------------------------------------------------------------------------
 elif s.screen == DETECT:
-    header("Auto-detect my exercise", "Get into position — recognition runs over a "
-           "short window so one odd frame can't flip the answer.", HOME)
+    header("Auto-detect my exercise", "Get into position — recognition runs over a short window so one odd frame can't flip the answer.", HOME)
     source_picker("detect")
-    st.info("Recognition covers Warrior II, Tree Pose, Squat and Bicep Curl. "
-            "If confidence is low you'll be asked to choose manually.")
-
+    st.info("Recognition covers Warrior II, Tree Pose, Squat and Bicep Curl. If confidence is low you'll be asked to choose manually.")
     c1, c2 = st.columns(2)
     if c1.button("Start detection", type="primary"):
         s.exercise = None
@@ -283,17 +608,14 @@ elif s.screen == DETECT:
     disclaimer()
 
 
-# ==========================================================================
+# --------------------------------------------------------------------------
 # CALIBRATION
-# ==========================================================================
+# --------------------------------------------------------------------------
 elif s.screen == CALIBRATE:
     name = s.registry.get(s.exercise).name if s.exercise else "Auto-detect"
     header("Calibration", f"{name} — building your Personal Body Map.", HOME)
     source_picker("cal")
-
-    st.markdown("Stand so your whole body is in frame. This takes a few seconds and "
-                "decides which measurements apply to **your** body.")
-
+    st.markdown("Stand so your whole body is in frame. This takes a few seconds and decides which measurements apply to **your** body.")
     if st.button("Run calibration", type="primary"):
         src = build_source()
         if src is None or not src.open():
@@ -309,8 +631,7 @@ elif s.screen == CALIBRATE:
                     item = src.read()
                     if item is None or item.finished or item.image is None:
                         break
-                    f = (s.engine.process(item.image) if src.needs_detection
-                         else s.engine.process_pose(item.pose))
+                    f = s.engine.process(item.image) if src.needs_detection else s.engine.process_pose(item.pose)
                     bar.progress(min(1.0, f.calibration_progress), text="Detecting landmarks…")
                     slot.image(item.image, channels="BGR", width=340)
                     if s.engine.body_map is not None:
@@ -320,65 +641,39 @@ elif s.screen == CALIBRATE:
             s.body_map = s.engine.body_map
             bar.empty()
             slot.empty()
-
     if s.body_map is not None:
         bm = s.body_map
         st.markdown(theme.eyebrow("Personal Body Map"), unsafe_allow_html=True)
         chips = "".join(theme.chip(g, ok) for g, ok in group_status(bm))
-        st.markdown(f"<div class='mw-glass' style='padding:18px 20px'>{chips}</div>",
-                    unsafe_allow_html=True)
+        st.markdown(f"<div class='mw-glass' style='padding:18px 20px'>{chips}</div>", unsafe_allow_html=True)
         st.write("")
-
         if bm.mode is BodyMode.ADAPTIVE:
-            st.warning("**Adaptive Mode** — some landmarks aren't trackable. "
-                       "Those measurements are switched off rather than counted "
-                       "against you. A landmark we can't see is never a posture error.")
+            st.warning("**Adaptive Mode** — some landmarks aren't trackable. Those measurements are switched off rather than counted against you. A landmark we can't see is never a posture error.")
         else:
             st.success("Standard mode — full landmark set available.")
-
         if st.button("Continue to live analysis", type="primary"):
             s.coach.reset()
             s.registry.reset_all()
             s.recognizer.reset()
             prof0 = s.registry.get(s.exercise) if s.exercise else None
-            s.recorder = SessionRecorder(
-                exercise=s.exercise or "",
-                exercise_name=prof0.name if prof0 else "Auto-detect",
-                adaptive_mode=(s.body_map is not None
-                               and s.body_map.mode is BodyMode.ADAPTIVE))
-            # Always open a fresh source for a new session, and wipe stale
-            # dashboard cache from any previous session.
+            s.recorder = SessionRecorder(exercise=s.exercise or "", exercise_name=prof0.name if prof0 else "Auto-detect", adaptive_mode=(s.body_map is not None and s.body_map.mode is BodyMode.ADAPTIVE))
             _release_live_src()
             _clear_live_panel_cache()
             go(LIVE)
     disclaimer()
 
 
-# ==========================================================================
+# --------------------------------------------------------------------------
 # LIVE ANALYSIS
-# ==========================================================================
+# --------------------------------------------------------------------------
 elif s.screen == LIVE:
-    # ------------------------------------------------------------------
-    # On every Streamlit rerun we re-enter this branch.  The camera must
-    # stay open across reruns (button clicks, ghost toggle, etc.) so we
-    # store the FrameSource in session state and only open it once.
-    # ------------------------------------------------------------------
-
     profile = s.registry.get(s.exercise) if s.exercise else None
-
-    # Header lives in a placeholder so it can update the moment auto-detect
-    # locks on — otherwise it reads "Identifying exercise…" over a screen that
-    # is plainly already analysing a known exercise.
     head_slot = st.empty()
 
     def _set_header(name: str) -> None:
-        head_slot.markdown(theme.page_head(name, "One correction at a time."),
-                           unsafe_allow_html=True)
+        head_slot.markdown(theme.page_head(name, "One correction at a time."), unsafe_allow_html=True)
 
     _set_header(profile.name if profile else "Identifying exercise…")
-
-    # ---- session controls -------------------------------------------------
-    # Rendered BEFORE the capture loop so they stay clickable while it runs.
     bar = st.columns([0.9, 1, 1, 1, 1, 0.9, 1.2])
     if bar[0].button("← Back", key="live_back"):
         _release_live_src()
@@ -386,21 +681,15 @@ elif s.screen == LIVE:
     for i, ex_key in enumerate(("warrior_2", "tree_pose", "squat", "bicep_curl")):
         ex_prof = s.registry.get(ex_key)
         active = s.exercise == ex_key
-        if bar[i + 1].button(ex_prof.name, key=f"live_switch_{ex_key}",
-                             type="primary" if active else "secondary") and not active:
+        if bar[i + 1].button(ex_prof.name, key=f"live_switch_{ex_key}", type="primary" if active else "secondary") and not active:
             s.exercise = ex_key
             ex_prof.reset()
             s.coach.reset()
-            s.recorder = SessionRecorder(
-                exercise=ex_key, exercise_name=ex_prof.name,
-                adaptive_mode=(s.body_map is not None
-                               and s.body_map.mode is BodyMode.ADAPTIVE))
+            s.recorder = SessionRecorder(exercise=ex_key, exercise_name=ex_prof.name, adaptive_mode=(s.body_map is not None and s.body_map.mode is BodyMode.ADAPTIVE))
             match_clip_to_exercise()
-            # Release camera so it reopens cleanly with the new source config
             _release_live_src()
             st.rerun()
-    if bar[5].button(("👻 On" if s.ghost else "👻 Off"), key="live_ghost",
-                     help="Toggle the reference guide"):
+    if bar[5].button(("👻 On" if s.ghost else "👻 Off"), key="live_ghost", help="Toggle the reference guide"):
         s.ghost = not s.ghost
         st.rerun()
     if bar[6].button("⏹ End Session", key="live_end"):
@@ -409,21 +698,14 @@ elif s.screen == LIVE:
 
     top = st.columns([4, 2])
     video_slot = top[0].empty()
-
-    # The side-panel slots are written inside the loop.  To prevent them
-    # from going blank when a button triggers a rerun before the loop has
-    # run even once, we seed them with their last known values stored in
-    # session state, then overwrite from inside the loop as usual.
     side = top[1]
-    cue_slot   = side.empty()
+    cue_slot = side.empty()
     strip_slot = side.empty()
-    stat_slot  = side.empty()
+    stat_slot = side.empty()
     metric_slot = side.empty()
     action_slot = side.container()
     status_slot = st.empty()
 
-    # Restore last-known side panel content so the dashboard doesn't vanish
-    # on button-click reruns.
     _lc = getattr(s, "last_cue_html", None)
     _ls = getattr(s, "last_strip_html", None)
     _lr = getattr(s, "last_ring_html", None)
@@ -437,14 +719,11 @@ elif s.screen == LIVE:
     if _lm:
         metric_slot.markdown(_lm, unsafe_allow_html=True)
 
-    # ---- open / reuse the persistent source ------------------------------
     src = getattr(s, "live_src", None)
-    _src_ok = src is not None
-    if not _src_ok:
+    if src is None:
         src = build_source()
         if src is None or not src.open():
-            st.error("Could not open that input. Go back and pick **Sample clip** — "
-                     "it needs no camera.")
+            st.error("Could not open that input. Go back and pick **Sample clip** — it needs no camera.")
             if st.button("← Back", key="live_err_back"):
                 go(CALIBRATE)
             st.stop()
@@ -455,12 +734,9 @@ elif s.screen == LIVE:
     if not src.needs_detection:
         s.engine.calibrator.duration = 0.5
 
-    recorder: SessionRecorder = s.recorder or SessionRecorder(
-        exercise=s.exercise or "",
-        exercise_name=profile.name if profile else "Auto-detect")
+    recorder: SessionRecorder = s.recorder or SessionRecorder(exercise=s.exercise or "", exercise_name=profile.name if profile else "Auto-detect")
     s.recorder = recorder
     coach: AdaptiveCoach = s.coach
-
     _loop_done = False
     try:
         while True:
@@ -472,85 +748,54 @@ elif s.screen == LIVE:
                 break
             if item.image is None:
                 continue
-
-            frame = (s.engine.process(item.image) if src.needs_detection
-                     else s.engine.process_pose(item.pose))
-
+            frame = s.engine.process(item.image) if src.needs_detection else s.engine.process_pose(item.pose)
             if profile is None:
                 rec = s.recognizer.observe(frame)
                 if rec.confident and rec.key:
                     s.exercise = rec.key
                     profile = s.registry.get(rec.key)
-                    _set_header(profile.name)   # detection locked on
+                    _set_header(profile.name)
                 else:
                     canvas = item.image.copy()
                     overlay.draw_skeleton(canvas, frame.pose)
                     overlay.draw_banner(canvas, "Identifying exercise", rec.message)
                     video_slot.image(canvas, channels="BGR", use_container_width=True)
                     continue
-
             result = profile.analyse(frame)
             coaching = coach.update(result, frame.timestamp)
             recorder.update(result, frame.timestamp)
             s.last_coaching = coaching
-
-            # ---- draw ----------------------------------------------------
             canvas = item.image.copy()
             primary = result.primary_error
             ghost = None
             emphasise = coaching.modality is Modality.GHOST_EMPHASIS
-
             if s.ghost and result.ready:
-                ghost = fit_reference(profile.key, frame.pose, canvas.shape,
-                                      progress=result.reference_progress,
-                                      mirror=getattr(profile, "front_side", None) == "right")
+                ghost = fit_reference(profile.key, frame.pose, canvas.shape, progress=result.reference_progress, mirror=getattr(profile, "front_side", None) == "right")
                 overlay.draw_ghost(canvas, ghost, emphasis=emphasise)
-
-            overlay.draw_skeleton(canvas, frame.pose,
-                                  highlight=primary.landmarks if primary else ())
-
-            if primary and ghost and coaching.modality in (Modality.ARROW,
-                                                           Modality.GHOST_EMPHASIS):
+            overlay.draw_skeleton(canvas, frame.pose, highlight=primary.landmarks if primary else ())
+            if primary and ghost and coaching.modality in (Modality.ARROW, Modality.GHOST_EMPHASIS):
                 for lm in primary.landmarks[:1]:
-                    overlay.draw_arrow(canvas,
-                                       correction_arrow(frame.pose, ghost, lm, canvas.shape,
-                                                        config.GHOST_ARROW_MIN_PIXELS),
-                                       primary.cue)
-
+                    overlay.draw_arrow(canvas, correction_arrow(frame.pose, ghost, lm, canvas.shape, config.GHOST_ARROW_MIN_PIXELS), primary.cue)
             if frame.calibrating:
                 overlay.draw_calibration(canvas, frame.calibration_progress)
             elif result.ready:
-                overlay.draw_banner(canvas, coaching.message or "Good form",
-                                    f"{profile.name} · {result.phase}",
-                                    fault=primary is not None)
-                overlay.draw_score_badge(
-                    canvas, result.score, result.phase,
-                    reps=result.rep_count if result.movement == "dynamic" else None,
-                    hold=result.hold_duration if result.movement == "static" else None)
+                overlay.draw_banner(canvas, coaching.message or "Good form", f"{profile.name} · {result.phase}", fault=primary is not None)
+                overlay.draw_score_badge(canvas, result.score, result.phase, reps=result.rep_count if result.movement == "dynamic" else None, hold=result.hold_duration if result.movement == "static" else None)
                 if profile.key in PHASE_TRACKS:
                     overlay.draw_phase_track(canvas, PHASE_TRACKS[profile.key], result.phase)
             else:
-                overlay.draw_banner(canvas, profile.name,
-                                    result.notes[0] if result.notes else "", fault=True)
-
+                overlay.draw_banner(canvas, profile.name, result.notes[0] if result.notes else "", fault=True)
             try:
                 video_slot.image(canvas, channels="BGR", use_container_width=True)
             except Exception:
-                # One undisplayable frame is invisible if skipped and fatal if
-                # raised — the stream continues either way.
                 pass
-
-            # ---- side panel ----------------------------------------------
             if result.ready:
                 colour = theme.BAD if primary else theme.GOOD
-                stage = (coaching.stage.name if primary else "ON TRACK")
+                stage = coaching.stage.name if primary else "ON TRACK"
                 mod = coaching.modality.name.replace("_", " ").lower()
-                _cue_html = theme.cue(f"{stage} · {mod}", coaching.message or "Good form",
-                                      colour, alert=bool(primary) and coaching.speak)
+                _cue_html = theme.cue(f"{stage} · {mod}", coaching.message or "Good form", colour, alert=bool(primary) and coaching.speak)
                 cue_slot.markdown(_cue_html, unsafe_allow_html=True)
                 s.last_cue_html = _cue_html
-
-                # Subtle status strip: movement-control state + ghost alignment.
                 chips = []
                 control = getattr(result, "control", None)
                 if control is not None:
@@ -567,43 +812,25 @@ elif s.screen == LIVE:
                     elif guide == "close":
                         chips.append(("Near the guide", theme.WARN))
                 if chips:
-                    _strip_html = "".join(
-                        f"<span class='mw-chip' style='color:{c};"
-                        f"border-color:{c}55'>● {t}</span>"
-                        for t, c in chips)
+                    _strip_html = "".join(f"<span class='mw-chip' style='color:{c};border-color:{c}55'>● {t}</span>" for t, c in chips)
                     strip_slot.markdown(_strip_html, unsafe_allow_html=True)
                     s.last_strip_html = _strip_html
                 else:
                     strip_slot.empty()
                     s.last_strip_html = None
-
-                counter = (f"{result.rep_count}" if result.movement == "dynamic"
-                           else f"{result.hold_duration:.0f}s")
+                counter = f"{result.rep_count}" if result.movement == "dynamic" else f"{result.hold_duration:.0f}s"
                 label = "Reps" if result.movement == "dynamic" else "Hold"
                 _ring_html = theme.ring(result.score, counter, label)
                 stat_slot.markdown(_ring_html, unsafe_allow_html=True)
                 s.last_ring_html = _ring_html
-
-                rows = "".join(
-                    theme.bar_row(m.label, m.display, m.score(),
-                                  theme.score_color(m.score()))
-                    for m in result.metrics[:6])
-                extra = theme.bar_row("Corrections fixed",
-                                      f"{coaching.successes}/{coaching.attempts}",
-                                      None, theme.LAVENDER) if coaching.attempts else ""
+                rows = "".join(theme.bar_row(m.label, m.display, m.score(), theme.score_color(m.score())) for m in result.metrics[:6])
+                extra = theme.bar_row("Corrections fixed", f"{coaching.successes}/{coaching.attempts}", None, theme.LAVENDER) if coaching.attempts else ""
                 _metric_html = theme.metrics_panel(rows + extra)
                 metric_slot.markdown(_metric_html, unsafe_allow_html=True)
                 s.last_metric_html = _metric_html
-
-            # ---- comfort check / variation -------------------------------
             if coaching.show_comfort_check or coaching.suggested_variation:
                 break
-
-        # loop exited: clip ended or user interaction needed
     finally:
-        # Only release the source when the clip/video has genuinely finished.
-        # For a live webcam or a still-running stream, keep it open so the
-        # next rerun (button click) can resume without re-opening the camera.
         if _loop_done:
             _release_live_src()
 
@@ -618,11 +845,10 @@ elif s.screen == LIVE:
             coach.answer_comfort("challenging"); st.rerun()
         if c[2].button("🔴 Uncomfortable"):
             coach.answer_comfort("uncomfortable"); st.rerun()
-
     elif coaching and coaching.suggested_variation:
         var = coaching.suggested_variation
         vname = var.get("name", str(var)) if isinstance(var, dict) else str(var)
-        vhint = (var.get("hint") if isinstance(var, dict) else None) or             "This variation may be easier to perform."
+        vhint = (var.get("hint") if isinstance(var, dict) else None) or "This variation may be easier to perform."
         st.markdown("### Let's not force this movement.")
         st.info(f"**{vname}** — {vhint}")
         c = st.columns(2)
@@ -632,7 +858,6 @@ elif s.screen == LIVE:
             st.rerun()
         if c[1].button("Keep the original"):
             coach.reject_variation(); st.rerun()
-
     else:
         c = st.columns(2)
         if c[0].button("Finish session", type="primary", key="finish_bottom"):
@@ -644,9 +869,9 @@ elif s.screen == LIVE:
     disclaimer()
 
 
-# ==========================================================================
+# --------------------------------------------------------------------------
 # SESSION SUMMARY
-# ==========================================================================
+# --------------------------------------------------------------------------
 elif s.screen == SUMMARY:
     header("Session summary", "", HOME)
     sm = s.summary
@@ -654,39 +879,25 @@ elif s.screen == SUMMARY:
         st.info("No session recorded yet.")
     else:
         cols = st.columns(5)
-        cols[0].markdown(theme.stat(f"{sm.movement_score:.0f}%", "Movement score",
-                                    theme.score_color(sm.movement_score)),
-                         unsafe_allow_html=True)
+        cols[0].markdown(theme.stat(f"{sm.movement_score:.0f}%", "Movement score", theme.score_color(sm.movement_score)), unsafe_allow_html=True)
         control = getattr(sm, "control_score", None)
-        cols[1].markdown(theme.stat("--" if control is None else f"{control:.0f}%",
-                                    "Movement control", theme.score_color(control)),
-                         unsafe_allow_html=True)
+        cols[1].markdown(theme.stat("--" if control is None else f"{control:.0f}%", "Movement control", theme.score_color(control)), unsafe_allow_html=True)
         if sm.reps:
             cols[2].markdown(theme.stat(str(sm.reps), "Repetitions"), unsafe_allow_html=True)
-            cols[3].markdown(theme.stat(str(sm.good_reps), "Good reps",
-                                        theme.GOOD), unsafe_allow_html=True)
+            cols[3].markdown(theme.stat(str(sm.good_reps), "Good reps", theme.GOOD), unsafe_allow_html=True)
         else:
-            cols[2].markdown(theme.stat(f"{sm.hold_duration:.0f}s", "Hold"),
-                             unsafe_allow_html=True)
-            cols[3].markdown(theme.stat(f"{sm.duration:.0f}s", "Duration"),
-                             unsafe_allow_html=True)
-        cols[4].markdown(theme.stat(f"{sm.successful_corrections}/{sm.corrections}",
-                                    "Corrections fixed"), unsafe_allow_html=True)
-
+            cols[2].markdown(theme.stat(f"{sm.hold_duration:.0f}s", "Hold"), unsafe_allow_html=True)
+            cols[3].markdown(theme.stat(f"{sm.duration:.0f}s", "Duration"), unsafe_allow_html=True)
+        cols[4].markdown(theme.stat(f"{sm.successful_corrections}/{sm.corrections}", "Corrections fixed"), unsafe_allow_html=True)
         st.write("")
         left, right = st.columns(2)
         with left:
             st.markdown(theme.eyebrow("Applicable metrics"), unsafe_allow_html=True)
             if sm.metric_scores:
-                st.markdown(theme.metrics_panel("".join(
-                    theme.bar_row(name, f"{value:.0f}%", value,
-                                  theme.score_color(value))
-                    for name, value in sm.metric_scores.items())),
-                    unsafe_allow_html=True)
+                st.markdown(theme.metrics_panel("".join(theme.bar_row(name, f"{value:.0f}%", value, theme.score_color(value)) for name, value in sm.metric_scores.items())), unsafe_allow_html=True)
             else:
                 st.caption("No metric stayed measurable long enough to score.")
-            st.caption("Metrics that weren't applicable to your body map are excluded, "
-                       "not scored zero.")
+            st.caption("Metrics that weren't applicable to your body map are excluded, not scored zero.")
         with right:
             st.markdown(theme.eyebrow("What stood out"), unsafe_allow_html=True)
             st.markdown(f"**Exercise** — {sm.exercise_name}")
@@ -702,7 +913,6 @@ elif s.screen == SUMMARY:
                 st.markdown(f"**Variation used** — {sm.variation_used}")
             if sm.adaptive_mode:
                 st.markdown("**Adaptive Mode** — active for this session")
-
         c = st.columns(2)
         if c[0].button("View progress", type="primary"):
             go(PROGRESS)
@@ -711,145 +921,85 @@ elif s.screen == SUMMARY:
     disclaimer()
 
 
-# ==========================================================================
+# --------------------------------------------------------------------------
 # PROGRESS
-# ==========================================================================
+# --------------------------------------------------------------------------
 elif s.screen == PROGRESS:
-    header("My Progress", "Stored locally on this machine. No account, no cloud.", HOME)
-    rows = s.store.all()
+    header("My Progress", "Your sessions, trends and personalized movement profile.", HOME)
+    rows = db.get_user_sessions(st.session_state["user_id"])
+
+    # Profile is intentionally part of Progress — no logout button here.
+    render_profile_card(show_logout=False)
+
+    st.write("")
+    st.markdown(theme.eyebrow("Progress overview"), unsafe_allow_html=True)
     if not rows:
-        st.info("No sessions recorded yet. Complete your first session to start "
-                "tracking progress.")
+        st.info("No sessions recorded yet. Complete your first session to start tracking progress.")
     else:
-        # ---- 1. weekly stat row -------------------------------------------
-        wk = s.store.weekly_summary()
+        scores = [r["movement_score"] for r in rows if r.get("movement_score") is not None]
+        controls = [r["control_score"] for r in rows if r.get("control_score") is not None]
+        avg_score = sum(scores) / len(scores) if scores else None
+        avg_control = sum(controls) / len(controls) if controls else None
         cols = st.columns(4)
-        cols[0].markdown(theme.stat(str(wk["sessions"]), "Sessions this week"),
-                         unsafe_allow_html=True)
-        avg_score = wk.get("avg_score")
-        cols[1].markdown(theme.stat("--" if avg_score is None else f"{avg_score:.0f}%",
-                                    "Avg accuracy", theme.score_color(avg_score)),
-                         unsafe_allow_html=True)
-        avg_control = wk.get("avg_control")
-        cols[2].markdown(theme.stat("--" if avg_control is None else f"{avg_control:.0f}%",
-                                    "Avg control", theme.score_color(avg_control)),
-                         unsafe_allow_html=True)
-        cols[3].markdown(theme.stat(wk.get("most_improved") or "--", "Most improved",
-                                    theme.GOOD if wk.get("most_improved") else theme.MUTED),
-                         unsafe_allow_html=True)
+        cols[0].markdown(theme.stat(str(len(rows)), "Total Sessions"), unsafe_allow_html=True)
+        cols[1].markdown(theme.stat("--" if avg_score is None else f"{avg_score:.0f}%", "Avg accuracy", theme.score_color(avg_score)), unsafe_allow_html=True)
+        cols[2].markdown(theme.stat("--" if avg_control is None else f"{avg_control:.0f}%", "Avg control", theme.score_color(avg_control)), unsafe_allow_html=True)
+        cols[3].markdown(theme.stat(rows[0].get("exercise_name", "—"), "Latest Activity", theme.GOOD), unsafe_allow_html=True)
 
-        # ---- 2. seven day strip -------------------------------------------
-        st.write("")
-        st.markdown(theme.eyebrow("7-day progress"), unsafe_allow_html=True)
-        if len(rows) < 2:
-            st.caption("Complete more sessions to see your 7-day progress.")
-        day_cols = st.columns(7)
-        for col, day in zip(day_cols, s.store.last_7_days()):
-            score = day["score"]
-            colour = theme.score_color(score)
-            value = "—" if score is None else f"{score:.0f}"
-            tip = (f"{day['date']} — no session" if not day["sessions"] else
-                   f"{day['date']} — {day['sessions']} session"
-                   + ("s" if day["sessions"] != 1 else ""))
-            dots = "●" * min(int(day["sessions"]), 4)
-            col.markdown(
-                f"<div class='mw-glass mw-stat' title='{tip}'>"
-                f"<div class='k'>{day['label']}</div>"
-                f"<div class='v' style='color:{colour};font-size:1.7rem'>{value}</div>"
-                f"<div class='k' style='color:{theme.LAVENDER}'>{dots}&#8203;</div></div>",
-                unsafe_allow_html=True)
-
-        # ---- 3. previous sessions -----------------------------------------
         st.write("")
         st.markdown(theme.eyebrow("Previous sessions"), unsafe_allow_html=True)
-        listed = s.store.sessions_list()
-        labels = ["{d} — {n} — {s}".format(
-            d=item["date"], n=item["exercise_name"],
-            s="--" if item["score"] is None else f"{item['score']:.0f}%")
-            for item in listed]
-        choice = st.selectbox("Session", range(len(listed)),
-                              format_func=lambda i: labels[i], key="prog_session")
-        picked = s.store.get_session(listed[choice]["index"]) if listed else None
-        if picked:
-            pleft, pright = st.columns(2)
-            with pleft:
-                metrics = picked.get("metric_scores") or {}
-                if isinstance(metrics, dict) and metrics:
-                    prows = "".join(
-                        theme.bar_row(name.replace("_", " ").capitalize(), f"{val:.0f}%",
-                                      val, theme.score_color(val))
-                        for name, val in metrics.items()
-                        if isinstance(val, (int, float)))
-                    st.markdown(theme.metrics_panel(prows), unsafe_allow_html=True)
-                else:
-                    st.caption("No metric stayed measurable long enough to score.")
-            with pright:
-                psc = picked.get("movement_score")
-                pct = picked.get("control_score")
-                st.markdown(f"**Exercise** — {picked.get('exercise_name', '?')}")
-                st.markdown("**Accuracy** — "
-                            + ("--" if psc is None else f"{psc:.0f}%"))
-                st.markdown("**Movement control** — "
-                            + ("--" if pct is None else f"{pct:.0f}%"))
-                if picked.get("reps"):
-                    st.markdown(f"**Reps** — {picked.get('reps')} "
-                                f"({picked.get('good_reps', 0)} clean)")
-                if picked.get("main_issue"):
-                    st.markdown(f"**Main issue** — {picked['main_issue']}")
-                unstable = picked.get("unstable_events")
-                if isinstance(unstable, (int, float)) and unstable > 0:
-                    st.markdown(f"**Unstable or jerky moments** — {int(unstable)}")
-
-        # ---- 4. per-exercise progress --------------------------------------
-        st.write("")
-        st.markdown(theme.eyebrow("Exercise progress"), unsafe_allow_html=True)
-        for key, info in s.store.exercise_progress().items():
-            avg, ctl, best = info["avg_score"], info["avg_control"], info["best_score"]
-            erows = theme.bar_row("Avg accuracy",
-                                  "--" if avg is None else f"{avg:.0f}%",
-                                  avg, theme.score_color(avg))
-            erows += theme.bar_row("Avg control",
-                                   "--" if ctl is None else f"{ctl:.0f}%",
-                                   ctl, theme.score_color(ctl))
-            erows += theme.bar_row("Best score",
-                                   "--" if best is None else f"{best:.0f}%",
-                                   best, theme.score_color(best))
-            n = info["sessions"]
-            st.markdown(f"**{info['name']}** · {n} session{'s' if n != 1 else ''}")
-            st.markdown(theme.metrics_panel(erows), unsafe_allow_html=True)
-
-        # ---- 5. improvement -------------------------------------------------
-        st.write("")
-        st.markdown(theme.eyebrow("Improvement"), unsafe_allow_html=True)
-        imp = s.store.improvement()
-        if imp is None:
-            st.caption("Complete at least two sessions to see your performance "
-                       "improvement.")
-        else:
-            def _imp_line(label, pair):
-                if not pair:
-                    return
-                a, b = pair
-                delta = b - a
-                sign = "+" if delta >= 0 else ""
-                st.markdown(f"**{label}**: {a:.0f}% → {b:.0f}% ({sign}{delta:.0f}%)")
-            _imp_line("Accuracy", imp.get("accuracy"))
-            _imp_line("Control", imp.get("control"))
-            if not imp.get("accuracy") and not imp.get("control"):
-                st.caption("Not enough measured data yet for a performance "
-                           "improvement comparison.")
+        labels = [
+            f"{item.get('date', '')} — {item.get('exercise_name', '?')} — "
+            f"{'--' if item.get('movement_score') is None else f'{item.get('movement_score'):.0f}%'}"
+            for item in rows
+        ]
+        choice = st.selectbox("Session", range(len(rows)), format_func=lambda i: labels[i], key="prog_session")
+        picked = rows[choice]
+        pleft, pright = st.columns(2)
+        with pleft:
+            metrics = picked.get("metric_scores") or {}
+            if isinstance(metrics, dict) and metrics:
+                prows = "".join(
+                    theme.bar_row(name.replace("_", " ").capitalize(), f"{val:.0f}%", val, theme.score_color(val))
+                    for name, val in metrics.items() if isinstance(val, (int, float))
+                )
+                st.markdown(theme.metrics_panel(prows), unsafe_allow_html=True)
             else:
-                st.caption("Performance improvement, earliest session to latest.")
+                st.caption("No metric stayed measurable long enough to score.")
+        with pright:
+            psc = picked.get("movement_score")
+            pct = picked.get("control_score")
+            st.markdown(f"**Exercise** — {picked.get('exercise_name', '?')}")
+            st.markdown("**Accuracy** — " + ("--" if psc is None else f"{psc:.0f}%"))
+            st.markdown("**Movement control** — " + ("--" if pct is None else f"{pct:.0f}%"))
+            if picked.get("reps"):
+                st.markdown(f"**Reps** — {picked.get('reps')} ({picked.get('good_reps', 0)} clean)")
+            if picked.get("main_issue"):
+                st.markdown(f"**Main issue** — {picked['main_issue']}")
 
-        # ---- 6. weekly note --------------------------------------------------
         st.write("")
-        st.markdown(theme.eyebrow("Weekly summary"), unsafe_allow_html=True)
-        st.markdown(wk["note"])
-        if wk.get("focus"):
-            st.markdown(f"**Recommended focus** — {wk['focus']}")
-
-        st.write("")
-        if st.button("Clear history"):
-            s.store.clear()
+        if st.button("Clear exercise history", key="clear_history"):
+            db.clear_user_history(st.session_state["user_id"])
             st.rerun()
     disclaimer()
+
+
+# --------------------------------------------------------------------------
+# ACCOUNT
+# --------------------------------------------------------------------------
+elif s.screen == ACCOUNT:
+    header("Account", "Manage your MoveWise profile and account settings.", HOME)
+    render_profile_card(show_logout=True)
+    st.markdown(
+        """
+        <div class="mw-glass" style="padding:18px 22px;margin-top:20px;">
+            <div style="font-weight:700;">Your data stays connected to your account</div>
+            <div style="opacity:.68;margin-top:5px;">
+                Profile information and completed exercise sessions are stored in the local SQLite database.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    disclaimer()
+
