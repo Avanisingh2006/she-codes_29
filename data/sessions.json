@@ -1,0 +1,52 @@
+[
+  {
+    "exercise": "warrior_2",
+    "exercise_name": "Warrior II",
+    "started_at": 1786517259.030187,
+    "date_label": "12 Aug 12:17",
+    "duration": 1.25,
+    "movement_score": 0.0,
+    "reps": 0,
+    "good_reps": 0,
+    "hold_duration": 0.0,
+    "corrections": 0,
+    "successful_corrections": 0,
+    "metric_scores": {},
+    "main_issue": "",
+    "most_common_error": "",
+    "biggest_improvement": null,
+    "variation_used": null,
+    "adaptive_mode": true,
+    "control_score": null,
+    "unstable_events": 0,
+    "control_improved": null
+  },
+  {
+    "exercise": "bicep_curl",
+    "exercise_name": "Bicep Curl",
+    "started_at": 1786521179.5469015,
+    "date_label": "12 Aug 13:22",
+    "duration": 70.17,
+    "movement_score": 80.3,
+    "reps": 4,
+    "good_reps": 0,
+    "hold_duration": 0.0,
+    "corrections": 10,
+    "successful_corrections": 8,
+    "metric_scores": {
+      "left_elbow": 99.5,
+      "right_elbow": 100.0,
+      "elbow_stability": 68.9,
+      "movement_control": 100.0,
+      "rom": 100.0
+    },
+    "main_issue": "Left elbow drift",
+    "most_common_error": "left_elbow_drift",
+    "biggest_improvement": null,
+    "variation_used": null,
+    "adaptive_mode": true,
+    "control_score": 99.1,
+    "unstable_events": 0,
+    "control_improved": false
+  }
+]
