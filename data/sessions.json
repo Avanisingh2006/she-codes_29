@@ -259,5 +259,34 @@
     "control_score": 98.6,
     "unstable_events": 0,
     "control_improved": false
+  },
+  {
+    "exercise": "bicep_curl",
+    "exercise_name": "Bicep Curl",
+    "started_at": 1786549993.6353238,
+    "date_label": "12 Aug 21:23",
+    "duration": 29.41,
+    "movement_score": 67.4,
+    "reps": 0,
+    "good_reps": 0,
+    "hold_duration": 0.0,
+    "corrections": 0,
+    "successful_corrections": 0,
+    "metric_scores": {
+      "elbow_stability": 67.4,
+      "movement_control": 100.0
+    },
+    "main_issue": "",
+    "most_common_error": "",
+    "biggest_improvement": {
+      "metric": "Elbow stability",
+      "key": "elbow_stability",
+      "delta": 4.1
+    },
+    "variation_used": null,
+    "adaptive_mode": true,
+    "control_score": 99.0,
+    "unstable_events": 0,
+    "control_improved": true
   }
 ]
