@@ -169,5 +169,95 @@
     "control_score": 99.9,
     "unstable_events": 0,
     "control_improved": false
+  },
+  {
+    "exercise": "bicep_curl",
+    "exercise_name": "Bicep Curl",
+    "started_at": 1786537421.3639205,
+    "date_label": "12 Aug 17:53",
+    "duration": 147.31,
+    "movement_score": 77.3,
+    "reps": 0,
+    "good_reps": 0,
+    "hold_duration": 0.0,
+    "corrections": 11,
+    "successful_corrections": 10,
+    "metric_scores": {
+      "elbow_stability": 73.5,
+      "body_swing": 95.0,
+      "right_elbow": 100.0,
+      "left_elbow": 100.0,
+      "movement_control": 99.7
+    },
+    "main_issue": "Left elbow drift",
+    "most_common_error": "left_elbow_drift",
+    "biggest_improvement": {
+      "metric": "Body swing",
+      "key": "body_swing",
+      "delta": 3.7
+    },
+    "variation_used": null,
+    "adaptive_mode": true,
+    "control_score": 96.3,
+    "unstable_events": 1,
+    "control_improved": false
+  },
+  {
+    "exercise": "bicep_curl",
+    "exercise_name": "Bicep Curl",
+    "started_at": 1786538596.4363322,
+    "date_label": "12 Aug 18:13",
+    "duration": 42.11,
+    "movement_score": 64.3,
+    "reps": 0,
+    "good_reps": 0,
+    "hold_duration": 0.0,
+    "corrections": 0,
+    "successful_corrections": 0,
+    "metric_scores": {
+      "elbow_stability": 64.3,
+      "movement_control": 100.0
+    },
+    "main_issue": "",
+    "most_common_error": "",
+    "biggest_improvement": null,
+    "variation_used": null,
+    "adaptive_mode": true,
+    "control_score": 96.6,
+    "unstable_events": 0,
+    "control_improved": false
+  },
+  {
+    "exercise": "bicep_curl",
+    "exercise_name": "Bicep Curl",
+    "started_at": 1786539772.0212343,
+    "date_label": "12 Aug 18:32",
+    "duration": 36.58,
+    "movement_score": 92.5,
+    "reps": 2,
+    "good_reps": 2,
+    "hold_duration": 0.0,
+    "corrections": 7,
+    "successful_corrections": 7,
+    "metric_scores": {
+      "left_elbow": 100.0,
+      "elbow_stability": 93.0,
+      "body_swing": 96.9,
+      "right_elbow": 100.0,
+      "movement_control": 100.0,
+      "rom": 100.0
+    },
+    "main_issue": "Left elbow drift",
+    "most_common_error": "left_elbow_drift",
+    "biggest_improvement": {
+      "metric": "Body swing",
+      "key": "body_swing",
+      "delta": 8.0
+    },
+    "variation_used": null,
+    "adaptive_mode": true,
+    "control_score": 98.6,
+    "unstable_events": 0,
+    "control_improved": false
   }
 ]
