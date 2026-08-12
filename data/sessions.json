@@ -48,5 +48,126 @@
     "control_score": 99.1,
     "unstable_events": 0,
     "control_improved": false
+  },
+  {
+    "exercise": "bicep_curl",
+    "exercise_name": "Bicep Curl",
+    "started_at": 1786534171.3161104,
+    "date_label": "12 Aug 16:59",
+    "duration": 6.23,
+    "movement_score": 76.0,
+    "reps": 0,
+    "good_reps": 0,
+    "hold_duration": 0.0,
+    "corrections": 0,
+    "successful_corrections": 0,
+    "metric_scores": {
+      "elbow_stability": 76.0,
+      "movement_control": 100.0
+    },
+    "main_issue": "",
+    "most_common_error": "",
+    "biggest_improvement": {
+      "metric": "Elbow stability",
+      "key": "elbow_stability",
+      "delta": 25.6
+    },
+    "variation_used": null,
+    "adaptive_mode": true,
+    "control_score": 100.0,
+    "unstable_events": 0,
+    "control_improved": false
+  },
+  {
+    "exercise": "bicep_curl",
+    "exercise_name": "Bicep Curl",
+    "started_at": 1786534577.2942748,
+    "date_label": "12 Aug 17:06",
+    "duration": 246.08,
+    "movement_score": 28.3,
+    "reps": 0,
+    "good_reps": 0,
+    "hold_duration": 0.0,
+    "corrections": 0,
+    "successful_corrections": 0,
+    "metric_scores": {
+      "elbow_stability": 28.3
+    },
+    "main_issue": "",
+    "most_common_error": "",
+    "biggest_improvement": {
+      "metric": "Elbow stability",
+      "key": "elbow_stability",
+      "delta": 5.1
+    },
+    "variation_used": null,
+    "adaptive_mode": true,
+    "control_score": null,
+    "unstable_events": 0,
+    "control_improved": null
+  },
+  {
+    "exercise": "bicep_curl",
+    "exercise_name": "Bicep Curl",
+    "started_at": 1786535069.6735694,
+    "date_label": "12 Aug 17:14",
+    "duration": 38.25,
+    "movement_score": 88.4,
+    "reps": 0,
+    "good_reps": 0,
+    "hold_duration": 0.0,
+    "corrections": 10,
+    "successful_corrections": 9,
+    "metric_scores": {
+      "left_elbow": 100.0,
+      "right_elbow": 100.0,
+      "elbow_stability": 97.7,
+      "body_swing": 91.8,
+      "movement_control": 100.0
+    },
+    "main_issue": "Body swing",
+    "most_common_error": "body_swing",
+    "biggest_improvement": {
+      "metric": "Body swing",
+      "key": "body_swing",
+      "delta": 4.7
+    },
+    "variation_used": null,
+    "adaptive_mode": false,
+    "control_score": 99.8,
+    "unstable_events": 1,
+    "control_improved": false
+  },
+  {
+    "exercise": "bicep_curl",
+    "exercise_name": "Bicep Curl",
+    "started_at": 1786535709.7123635,
+    "date_label": "12 Aug 17:25",
+    "duration": 23.34,
+    "movement_score": 43.4,
+    "reps": 0,
+    "good_reps": 0,
+    "hold_duration": 0.0,
+    "corrections": 4,
+    "successful_corrections": 3,
+    "metric_scores": {
+      "right_elbow": 100.0,
+      "elbow_stability": 39.2,
+      "body_swing": 24.7,
+      "left_elbow": 100.0,
+      "movement_control": 100.0
+    },
+    "main_issue": "Right elbow drift",
+    "most_common_error": "right_elbow_drift",
+    "biggest_improvement": {
+      "metric": "Body swing",
+      "key": "body_swing",
+      "delta": 63.4
+    },
+    "variation_used": null,
+    "adaptive_mode": false,
+    "control_score": 99.9,
+    "unstable_events": 0,
+    "control_improved": false
   }
 ]

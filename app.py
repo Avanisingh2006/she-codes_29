@@ -55,6 +55,21 @@ PHASE_TRACKS = {
 }
 
 # --------------------------------------------------------------------------
+# EARLY SESSION-STATE INITIALIZATION
+# --------------------------------------------------------------------------
+# These values must exist before source_picker()/match_clip_to_exercise()
+# can access them.
+for _key, _default in {
+    "clip_key": None,
+    "exercise": None,
+    "authenticated": False,
+    "user_id": None,
+    "username": "",
+}.items():
+    if _key not in st.session_state:
+        st.session_state[_key] = _default
+
+# --------------------------------------------------------------------------
 # SESSION STATE & AUTHENTICATION INITIALIZATION
 # --------------------------------------------------------------------------
 if "authenticated" not in st.session_state:
@@ -680,9 +695,9 @@ elif s.screen == LIVE:
         go(LIBRARY)
     for i, ex_key in enumerate(("warrior_2", "tree_pose", "squat", "bicep_curl")):
         ex_prof = s.registry.get(ex_key)
-        active = s.exercise == ex_key
+        active = st.session_state.get("exercise") == ex_key
         if bar[i + 1].button(ex_prof.name, key=f"live_switch_{ex_key}", type="primary" if active else "secondary") and not active:
-            s.exercise = ex_key
+            st.session_state["exercise"] = ex_key
             ex_prof.reset()
             s.coach.reset()
             s.recorder = SessionRecorder(exercise=ex_key, exercise_name=ex_prof.name, adaptive_mode=(s.body_map is not None and s.body_map.mode is BodyMode.ADAPTIVE))
