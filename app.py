@@ -8,10 +8,10 @@ Session summary -> Progress.
 from __future__ import annotations
 
 import sys
-import time
 import re
 import sqlite3
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -66,6 +66,12 @@ for _key, _default in {
     "authenticated": False,
     "user_id": None,
     "username": "",
+    "app_rep_count": 0,
+    "app_rep_phase": None,
+    "app_rep_started": False,
+    "comfort_variation": None,
+    "yoga_hold_started_at": None,
+    "yoga_hold_seconds": 0.0,
 }.items():
     if _key not in st.session_state:
         st.session_state[_key] = _default
@@ -103,6 +109,12 @@ def S():
         s.body_map = None
         s.last_coaching = None
         s.live_src = None
+        s.app_rep_count = 0
+        s.app_rep_phase = None
+        s.app_rep_started = False
+        s.comfort_variation = None
+        s.yoga_hold_started_at = None
+        s.yoga_hold_seconds = 0.0
     return s
 
 s = S()
@@ -130,6 +142,8 @@ def source_picker(where: str) -> None:
     if s.source_mode == "Sample clip":
         match_clip_to_exercise()
         titles = {c.key: c.title for c in CLIPS}
+        if s.clip_key not in titles:
+            s.clip_key = next(iter(titles))
         s.clip_key = st.selectbox("Clip", list(titles), format_func=lambda k: titles[k],
                                   key=f"clip_{where}", index=list(titles).index(s.clip_key))
         picked = next((c for c in CLIPS if c.key == s.clip_key), None)
@@ -148,7 +162,8 @@ def source_picker(where: str) -> None:
 def match_clip_to_exercise() -> None:
     if s.exercise is None or s.source_mode != "Sample clip":
         return
-    current = next((c for c in CLIPS if c.key == s.clip_key), None)
+    clip_key = st.session_state.get("clip_key")
+    current = next((c for c in CLIPS if c.key == clip_key), None)
     if current is not None and current.exercise_key == s.exercise:
         return
     fallback = next((c for c in CLIPS if c.exercise_key == s.exercise), None)
@@ -168,6 +183,10 @@ def finish_session() -> None:
         go(LIBRARY)
         return
     summary = s.recorder.finish()
+    if getattr(s, "app_rep_count", 0) and getattr(summary, "movement", "") == "dynamic":
+        summary.reps = max(int(getattr(summary, "reps", 0) or 0), int(s.app_rep_count))
+    elif getattr(s, "app_rep_count", 0) and s.exercise in ("squat", "bicep_curl"):
+        summary.reps = max(int(getattr(summary, "reps", 0) or 0), int(s.app_rep_count))
     summary.corrections = s.coach.total_attempts
     summary.successful_corrections = s.coach.successes
     if getattr(summary, "control_score", None) is None:
@@ -200,6 +219,98 @@ def finish_session() -> None:
     s.recorder = None
     _clear_live_panel_cache()
     go(SUMMARY)
+
+# --------------------------------------------------------------------------
+# MOVEMENT-SAFETY / COUNTING HELPERS
+# --------------------------------------------------------------------------
+def easier_variation(exercise_key: str) -> dict:
+    """Safe, simple alternatives shown when a user reports discomfort."""
+    variations = {
+        "warrior_2": {
+            "name": "Supported Warrior II",
+            "hint": "Take a smaller stance, bend the front knee less, and use a wall or chair for support. Hold only 5–7 seconds, then relax."
+        },
+        "tree_pose": {
+            "name": "Supported Tree Pose",
+            "hint": "Keep the toes of the raised foot on the floor or place the foot at the ankle. Keep one hand on a wall for balance and hold 5–7 seconds."
+        },
+        "squat": {
+            "name": "Chair-Assisted Squat",
+            "hint": "Place a chair behind you, squat only as far as comfortable, lightly tap the chair, then stand. Keep the movement slow and controlled."
+        },
+        "bicep_curl": {
+            "name": "Seated Light Curl",
+            "hint": "Sit down, use a lighter load (or no load), keep your elbows close to your body, and use a smaller comfortable range of motion."
+        },
+    }
+    return variations.get(exercise_key, {
+        "name": "Reduced-Range Version",
+        "hint": "Reduce the range of motion, slow down, and use support if needed. Stop if the movement remains uncomfortable."
+    })
+
+
+def update_app_rep_counter(result) -> int:
+    """Independent phase-based fallback counter for the two dynamic exercises.
+
+    It complements the exercise analyser instead of replacing it. A rep is
+    completed only after the full movement cycle returns to its start phase.
+    """
+    if getattr(result, "movement", None) != "dynamic":
+        return int(getattr(s, "app_rep_count", 0) or 0)
+
+    phase = str(getattr(result, "phase", "") or "").lower()
+    exercise = getattr(s, "exercise", None)
+
+    if exercise == "squat":
+        start, finish, peak = "standing", "standing", "bottom"
+        active_phases = {"descending", "bottom", "ascending"}
+    elif exercise == "bicep_curl":
+        start, finish, peak = "start", "start", "peak"
+        active_phases = {"curl", "peak", "return"}
+    else:
+        return int(getattr(s, "app_rep_count", 0) or 0)
+
+    previous = getattr(s, "app_rep_phase", None)
+    if phase == peak:
+        s.app_rep_started = True
+    if s.app_rep_started and previous in active_phases and phase == finish:
+        # Prevent duplicate increments while the analyser stays in the same
+        # return/start phase for several frames.
+        if previous != finish:
+            s.app_rep_count = int(getattr(s, "app_rep_count", 0) or 0) + 1
+        s.app_rep_started = False
+    s.app_rep_phase = phase
+    return int(getattr(s, "app_rep_count", 0) or 0)
+
+
+def update_yoga_hold_timer(result) -> float:
+    """Stable-form timer for yoga holds, capped at a 5–7 second target.
+
+    The timer runs only while the pose is ready and no primary correction is
+    active, so a broken pose does not falsely accumulate hold time.
+    """
+    if getattr(result, "movement", None) != "static":
+        return 0.0
+    now = time.monotonic()
+    good = bool(getattr(result, "ready", False)) and getattr(result, "primary_error", None) is None
+    if good:
+        if getattr(s, "yoga_hold_started_at", None) is None:
+            s.yoga_hold_started_at = now
+        s.yoga_hold_seconds = min(7.0, max(0.0, now - s.yoga_hold_started_at))
+    else:
+        s.yoga_hold_started_at = None
+        s.yoga_hold_seconds = 0.0
+    return float(s.yoga_hold_seconds)
+
+
+def reset_movement_tracking() -> None:
+    s.app_rep_count = 0
+    s.app_rep_phase = None
+    s.app_rep_started = False
+    s.comfort_variation = None
+    s.yoga_hold_started_at = None
+    s.yoga_hold_seconds = 0.0
+
 
 def build_source():
     if s.source_mode == "Webcam":
@@ -701,6 +812,7 @@ elif s.screen == LIVE:
             st.session_state["exercise"] = ex_key
             ex_prof.reset()
             s.coach.reset()
+            reset_movement_tracking()
             s.recorder = SessionRecorder(exercise=ex_key, exercise_name=ex_prof.name, adaptive_mode=(s.body_map is not None and s.body_map.mode is BodyMode.ADAPTIVE))
             match_clip_to_exercise()
             _release_live_src()
@@ -778,6 +890,8 @@ elif s.screen == LIVE:
                     video_slot.image(canvas, channels="BGR", use_container_width=True)
                     continue
             result = profile.analyse(frame)
+            app_reps = update_app_rep_counter(result)
+            yoga_hold = update_yoga_hold_timer(result)
             coaching = coach.update(result, frame.timestamp)
             recorder.update(result, frame.timestamp)
             s.last_coaching = coaching
@@ -796,7 +910,12 @@ elif s.screen == LIVE:
                 overlay.draw_calibration(canvas, frame.calibration_progress)
             elif result.ready:
                 overlay.draw_banner(canvas, coaching.message or "Good form", f"{profile.name} · {result.phase}", fault=primary is not None)
-                overlay.draw_score_badge(canvas, result.score, result.phase, reps=result.rep_count if result.movement == "dynamic" else None, hold=result.hold_duration if result.movement == "static" else None)
+                overlay.draw_score_badge(
+                    canvas, result.score, result.phase,
+                    reps=(max(int(getattr(result, "rep_count", 0) or 0), app_reps)
+                          if result.movement == "dynamic" else None),
+                    hold=(yoga_hold if result.movement == "static" else None),
+                )
                 if profile.key in PHASE_TRACKS:
                     overlay.draw_phase_track(canvas, PHASE_TRACKS[profile.key], result.phase)
             else:
@@ -834,10 +953,16 @@ elif s.screen == LIVE:
                 else:
                     strip_slot.empty()
                     s.last_strip_html = None
-                counter = f"{result.rep_count}" if result.movement == "dynamic" else f"{result.hold_duration:.0f}s"
+                counter = (
+                    f"{max(int(getattr(result, "rep_count", 0) or 0), app_reps)}"
+                    if result.movement == "dynamic"
+                    else f"{yoga_hold:.1f}s"
+                )
                 label = "Reps" if result.movement == "dynamic" else "Hold (5–7s)"
                 _ring_html = theme.ring(result.score, counter, label)
                 stat_slot.markdown(_ring_html, unsafe_allow_html=True)
+                if result.movement == "static":
+                    stat_slot.caption(f"Yoga hold target: 5–7 seconds · current stable hold: {yoga_hold:.1f}s")
                 s.last_ring_html = _ring_html
                 rows = "".join(theme.bar_row(m.label, m.display, m.score(), theme.score_color(m.score())) for m in result.metrics[:6])
                 extra = theme.bar_row("Corrections fixed", f"{coaching.successes}/{coaching.attempts}", None, theme.LAVENDER) if coaching.attempts else ""
@@ -855,12 +980,48 @@ elif s.screen == LIVE:
         st.markdown("### This movement seems difficult to maintain.")
         st.markdown("How does this movement feel?")
         c = st.columns(3)
-        if c[0].button("🟢 Comfortable"):
-            coach.answer_comfort("comfortable"); st.rerun()
-        if c[1].button("🟡 Challenging"):
-            coach.answer_comfort("challenging"); st.rerun()
-        if c[2].button("🔴 Uncomfortable"):
-            coach.answer_comfort("uncomfortable"); st.rerun()
+        if c[0].button("🟢 Comfortable", key="comfort_ok"):
+            coach.answer_comfort("comfortable")
+            s.comfort_variation = None
+            st.rerun()
+        if c[1].button("🟡 Challenging", key="comfort_challenging"):
+            coach.answer_comfort("challenging")
+            s.comfort_variation = None
+            st.rerun()
+        if c[2].button("🔴 Uncomfortable", key="comfort_uncomfortable"):
+            coach.answer_comfort("uncomfortable")
+            # Always provide a useful fallback even if the adaptive coach
+            # does not return a variation for this particular exercise.
+            s.comfort_variation = getattr(coaching, "suggested_variation", None) or easier_variation(s.exercise)
+            st.rerun()
+    elif getattr(s, "comfort_variation", None):
+        var = s.comfort_variation
+        vname = var.get("name", "Easier variation") if isinstance(var, dict) else str(var)
+        vhint = (var.get("hint", "Reduce the range and use support.") if isinstance(var, dict) else "Reduce the range and use support.")
+        st.markdown("### ❤️ Let's make this easier and more comfortable.")
+        st.info(f"**{vname}** — {vhint}")
+        st.caption("Do not push through pain. If discomfort continues, stop the movement.")
+        c = st.columns(2)
+        if c[0].button("▶️ Try easier version", type="primary", key="try_easier"):
+            try:
+                coach.accept_variation()
+            except Exception:
+                pass
+            if s.recorder is not None:
+                try:
+                    s.recorder.note_variation(vname)
+                except Exception:
+                    pass
+            s.comfort_variation = None
+            reset_movement_tracking()
+            st.rerun()
+        if c[1].button("↩️ Return to original", key="return_original"):
+            try:
+                coach.reject_variation()
+            except Exception:
+                pass
+            s.comfort_variation = None
+            st.rerun()
     elif coaching and coaching.suggested_variation:
         var = coaching.suggested_variation
         vname = var.get("name", str(var)) if isinstance(var, dict) else str(var)
@@ -1018,4 +1179,3 @@ elif s.screen == ACCOUNT:
         unsafe_allow_html=True,
     )
     disclaimer()
-
