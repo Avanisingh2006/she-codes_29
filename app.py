@@ -8,6 +8,7 @@ Session summary -> Progress.
 from __future__ import annotations
 
 import sys
+import time
 import re
 import sqlite3
 import tempfile
@@ -834,7 +835,7 @@ elif s.screen == LIVE:
                     strip_slot.empty()
                     s.last_strip_html = None
                 counter = f"{result.rep_count}" if result.movement == "dynamic" else f"{result.hold_duration:.0f}s"
-                label = "Reps" if result.movement == "dynamic" else "Hold"
+                label = "Reps" if result.movement == "dynamic" else "Hold (5–7s)"
                 _ring_html = theme.ring(result.score, counter, label)
                 stat_slot.markdown(_ring_html, unsafe_allow_html=True)
                 s.last_ring_html = _ring_html
